@@ -1,0 +1,102 @@
+---
+title: 'DATA 643: Project 5'
+author: "Logan Thomson"
+date: "7/9/2017"
+output: html_document
+---
+
+##LOAD LIBRARIES  
+
+```{r, message=FALSE}
+library(sparklyr)
+library(dplyr)
+library(tidyr)
+```  
+
+##SPARK CONNECT & DATA LOAD  
+
+In the interest of keeping things simple, a local connection will be used while exploring the new functions and data types used with Spark.  
+
+```{r}
+sc <- spark_connect(master="local")
+```  
+
+####Load Jester Data  
+
+For the project, the Jester data that was used last week is loaded. To test Spark's ability to handle larger data sets, the full set of Jester joke ratings will be used.  Some transformations of the row and column names were performed after discovering that the `ml_` functions in `sparklyr` required simple names. These transformations can be done inside of Spark as well.  
+
+```{r}
+jester <- read.csv("./jester-data-2.csv", header=FALSE, stringsAsFactors = FALSE)
+
+jester <- jester[ , -1]  # remove 1st col, contains no. jokes rated
+jester[jester==99] <- NA  # set 99s to NA 
+
+jester <- cbind(user = row.names(jester), jester)  #column for user id
+
+jester$user <- as.numeric(jester$user)
+
+colnames(jester) <- c("user", 2:101)
+
+colnames(jester[, 2:101]) <- as.numeric(colnames(jester[, 2:101]))
+
+# convert matrix from wide to long format
+
+jester <- jester %>% 
+  group_by(user) %>% 
+  gather(item, rating, 2:101)  # creates user, item, & rating columns for ml_als_factorization
+
+dim(jester)
+```  
+
+####Load into Spark  
+
+After loading the .csv file and doing some simple transformations, the data is then transferred/copied into Spark using `sparklyr`s `copy_to` function. Again, there were some issues with data types for the columns, so the "item" column is mutated into numeric format.  Also, NA values were omitted from the data in an attempt to get the data to work with the ALS algorithm.  Doing this removes a little more than 25% of the rows.  
+
+```{r}
+jstr_tbl <- copy_to(sc, jester, "jester", overwrite = TRUE)
+
+jstr_tbl <- jstr_tbl %>%
+  mutate(item = as.numeric(item))
+
+jstr_tbl <- jstr_tbl %>%
+  na.omit()
+```  
+
+####Split Data & Create Hive Metadata  
+
+```{r}
+jstr_part <- sdf_partition(jstr_tbl, training=0.8, testing=0.2)  
+```  
+
+```{r}
+sdf_register(jstr_part, c("spark_jstr_training", "spark_jstr_test"))
+```  
+
+Create reference to a Spark table for the training data:  
+
+```{r}
+train_jstr <- tbl(sc, "spark_jstr_training")
+```  
+
+Run the Alternating Least Squares machine learning model. Finally got this to work after a few attempts.  
+
+```{r}
+model_als <- train_jstr %>%
+  ml_als_factorization(user.column="user", item.column="item", rating.column="rating", iter.max=2)
+```  
+
+Create the Spark table reference for the test data set.  
+
+```{r}
+test_jstr <- tbl(sc, "spark_jstr_test")
+```  
+
+Unfortunately, the predict funtion would not work correctly, returning the following error:  
+`Error in ensure_scalar_character(output.col) : 'NULL" is not a length-one character vector`  
+
+Due to time constraints and the inability to find the solution to the resulting error message, attempts to sucessfully implement a recommendation system in Spark were not successful.  
+
+```{r}
+pred_jstr <- sdf_predict(model_als, test_jstr) %>%
+  collect
+```  
